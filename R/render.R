@@ -399,6 +399,30 @@ render_quarto_lang <- function(
   metadata <- list("yes")
   names(metadata) <- sprintf("lang-%s", language_code)
   withr::with_dir(proj_path, {
+
+    # ==================== PASS 2 SET DISTINCTION DIAGNOSTIC ====================
+    all_files <- fs::dir_ls(recurse = TRUE, regexp = "\\.(qmd|Rmd|ipynb)$")
+    
+    # 1. Target language files (e.g., *.en.qmd)
+    target_lang_regex <- sprintf("\\.%s\\.(qmd|Rmd|ipynb)$", language_code)
+    target_files <- fs::dir_ls(recurse = TRUE, regexp = target_lang_regex)
+    
+    # 2. Other non-primary language files (e.g., *.es.qmd when rendering 'en')
+    other_lang_regex <- "\\.[a-z]{2}(-[a-z]{2})?\\.(qmd|Rmd|ipynb)$"
+    all_translated_files <- fs::dir_ls(recurse = TRUE, regexp = other_lang_regex)
+    other_translated_files <- setdiff(all_translated_files, target_files)
+    
+    # 3. Base / primary files without language extension
+    base_files <- setdiff(all_files, all_translated_files)
+
+    cli::cli_alert_danger("================ PASS 2 DIAGNOSTIC ({language_code}) ================")
+    cli::cli_alert_info("TOTAL input files in workspace : {length(all_files)}")
+    cli::cli_alert_info("SET A (Target .{language_code} files)      : {length(target_files)}")
+    cli::cli_alert_info("SET B (Other translated files): {length(other_translated_files)}")
+    cli::cli_alert_info("SET C (Base / Primary files)  : {length(base_files)}")
+    cli::cli_alert_danger("==========================================================")
+    # ============================================================================
+
     quarto::quarto_render(
       as_job = FALSE,
       metadata = metadata,
@@ -540,7 +564,20 @@ add_links <- function(
     profile = c(language_code, profile)
   )
   lang_config <- q_inspect$config
-  config <- utils::modifyList(config, lang_config)
+
+  safe_modify_list <- function(x, val) {
+    for (name in names(val)) {
+      if (is.list(x[[name]]) && is.list(val[[name]]) && 
+          !is.data.frame(x[[name]]) && !is.data.frame(val[[name]])) {
+        x[[name]] <- safe_modify_list(x[[name]], val[[name]])
+      } else {
+        x[[name]] <- val[[name]]
+      }
+    }
+    x
+  }
+
+  config <- safe_modify_list(config, lang_config)
 
   codes <- read_lang_codes(config)
   current_lang <- purrr::keep(codes, ~ .x[["name"]] == language_code)
