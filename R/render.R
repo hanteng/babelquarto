@@ -274,6 +274,17 @@ render_quarto_lang <- function(
   project_name <- fs::path_file(path)
   proj_path <- fs::path(temporary_directory, project_name)
 
+  # Collapse the workspace to a single canonical file per chapter *before*
+  # anything (quarto_inspect, quarto_render) looks at proj_path. Without
+  # this, `name.qmd` (base) and `name.<lang>.qmd` (translated) sit
+  # side-by-side in the temp copy. Quarto's project-wide input globbing is
+  # OS-dependent: Windows' case/path-insensitive matching happens to
+  # shadow the base file, but Linux's strict POSIX globbing treats both as
+  # distinct chapters and renders them separately, inflating a 90-chapter
+  # book into ~170 queued targets and producing duplicate/"fake" English
+  # pages. Collapsing removes the ambiguity for every OS identically.
+  collapse_language_workspace(proj_path, language_code)
+
   # source for truth in terms of user intent
   # (not in yaml format and with tags that quarto does not understand)
   proj_config <- quarto::quarto_inspect(
@@ -356,72 +367,26 @@ render_quarto_lang <- function(
   config_yaml <- replace_true_false(config_yaml)
   yaml::write_yaml(config_yaml, file = config_path)
 
-  if (type == "website") {
-    # only keep what's needed, includes .qmd & .ipynb files
-    qmds <- fs::dir_ls(
-      file.path(temporary_directory, fs::path_file(path)),
-      glob = "*.qmd|*.Rmd|*.ipynb",
-      recurse = TRUE
-    )
-    language_files <- purrr::keep(
-      qmds,
-      \(x) {
-        any(
-          endsWith(x, sprintf(".%s.qmd", language_code)),
-          endsWith(x, sprintf(".%s.Rmd", language_code)),
-          endsWith(x, sprintf(".%s.ipynb", language_code))
-        )
-      }
-    )
-    fs::file_delete(qmds[!(qmds %in% language_files)])
-    for (file_path in language_files) {
-      # ensure that files are moved correctl, depending on ending
-      if (endsWith(file_path, ".qmd")) {
-        fs::file_move(
-          file_path,
-          sub(sprintf("%s.qmd", language_code), "qmd", file_path)
-        )
-      } else if (endsWith(file_path, ".Rmd")) {
-        fs::file_move(
-          file_path,
-          sub(sprintf("%s.Rmd", language_code), "Rmd", file_path)
-        )
-      } else {
-        fs::file_move(
-          file_path,
-          sub(sprintf("%s.ipynb", language_code), "ipynb", file_path)
-        )
-      }
-    }
-  }
-
   # Render language book
   metadata <- list("yes")
   names(metadata) <- sprintf("lang-%s", language_code)
   withr::with_dir(proj_path, {
 
-    # ==================== PASS 2 SET DISTINCTION DIAGNOSTIC ====================
-    all_files <- fs::dir_ls(recurse = TRUE, regexp = "\\.(qmd|Rmd|ipynb)$")
-    
-    # 1. Target language files (e.g., *.en.qmd)
-    target_lang_regex <- sprintf("\\.%s\\.(qmd|Rmd|ipynb)$", language_code)
-    target_files <- fs::dir_ls(recurse = TRUE, regexp = target_lang_regex)
-    
-    # 2. Other non-primary language files (e.g., *.es.qmd when rendering 'en')
-    other_lang_regex <- "\\.[a-z]{2}(-[a-z]{2})?\\.(qmd|Rmd|ipynb)$"
-    all_translated_files <- fs::dir_ls(recurse = TRUE, regexp = other_lang_regex)
-    other_translated_files <- setdiff(all_translated_files, target_files)
-    
-    # 3. Base / primary files without language extension
-    base_files <- setdiff(all_files, all_translated_files)
-
-    cli::cli_alert_danger("================ PASS 2 DIAGNOSTIC ({language_code}) ================")
-    cli::cli_alert_info("TOTAL input files in workspace : {length(all_files)}")
-    cli::cli_alert_info("SET A (Target .{language_code} files)      : {length(target_files)}")
-    cli::cli_alert_info("SET B (Other translated files): {length(other_translated_files)}")
-    cli::cli_alert_info("SET C (Base / Primary files)  : {length(base_files)}")
-    cli::cli_alert_danger("==========================================================")
-    # ============================================================================
+    # Sanity check: after collapse_language_workspace(), no file should
+    # still carry *any* language suffix (this pass's or another's) — every
+    # chapter must exist under exactly one, canonical, un-suffixed path.
+    # If this ever fires, the collapse step has a gap and Quarto would be
+    # about to glob duplicate/stray inputs again.
+    leftover_suffixed_files <- fs::dir_ls(
+      recurse = TRUE,
+      regexp = "\\.[a-z]{2}(-[a-z]{2,4})?\\.(qmd|Rmd|ipynb)$"
+    )
+    if (length(leftover_suffixed_files) > 0L) {
+      cli::cli_abort(c(
+        "Workspace isolation failed for language {.field {language_code}}.",
+        i = "{length(leftover_suffixed_files)} file{?s} still carry a language suffix and would be double-rendered: {leftover_suffixed_files}" # nolint: line_length_linter
+      ))
+    }
 
     quarto::quarto_render(
       as_job = FALSE,
@@ -441,6 +406,80 @@ render_quarto_lang <- function(
     file.path(proj_path, output_dir),
     file.path(path, output_dir, language_code)
   )
+}
+
+#' Collapse a per-language temp workspace to one file per chapter
+#'
+#' `babelquarto` copies the *whole* project (every language's source files)
+#' into a fresh temp directory for each language pass. Left as-is, that
+#' means `chapter1.qmd` (base/main language) and `chapter1.<lang>.qmd`
+#' (this pass's translation) both exist in `proj_path` when Quarto CLI is
+#' invoked. Quarto's project input globbing then depends on the OS:
+#' Windows silently shadows the base file and renders the expected chapter
+#' count; Linux's strict POSIX globbing enqueues *both* as independent
+#' chapters, roughly doubling the render count and producing stray
+#' `chapter1.html` pages alongside the correct `chapter1.<lang>.html`.
+#'
+#' This function makes the workspace unambiguous for the current language
+#' pass:
+#' 1. For every `name.<lang>.qmd` (or `.Rmd`/`.ipynb`), its content
+#'    overwrites `name.qmd`, and the suffixed file is then removed. Only
+#'    the canonical, un-suffixed path remains on disk, now holding the
+#'    correct-language content. This also means the existing
+#'    `book: chapters:`/`appendices:` lists (which reference base file
+#'    names) keep working unchanged.
+#' 2. Any leftover file suffixed with a *different* language code (e.g.
+#'    `chapter1.es.qmd` sitting around while rendering `en`) is deleted
+#'    outright, since it isn't part of this pass and would otherwise be
+#'    globbed too.
+#'
+#' Because this operates on a disposable per-language `withr::local_tempdir()`
+#' copy, it never touches the user's actual source files.
+#'
+#' @param proj_path Path to the temporary, per-language copy of the project.
+#' @param language_code The language code being rendered in this pass.
+#' @return Nothing, called for its side effect of tidying `proj_path`.
+#' @dev
+collapse_language_workspace <- function(proj_path, language_code) {
+  source_file_regex <- "\\.(qmd|Rmd|ipynb)$"
+
+  # 1. Promote this pass's localized files to canonical (un-suffixed) paths.
+  lang_suffix_regex <- sprintf("\\.%s%s", language_code, source_file_regex)
+  lang_files <- fs::dir_ls(
+    proj_path,
+    recurse = TRUE,
+    regexp = lang_suffix_regex
+  )
+
+  purrr::walk(lang_files, function(lang_file) {
+    base_file <- sub(
+      sprintf("\\.%s\\.", language_code),
+      ".",
+      lang_file
+    )
+    fs::file_copy(lang_file, base_file, overwrite = TRUE)
+    fs::file_delete(lang_file)
+  })
+
+  # 2. Drop any file still carrying a *different* language's suffix; those
+  #    are copies of other translations that have no business being
+  #    rendered in this pass.
+  other_lang_regex <- sprintf(
+    "\\.(?!%s\\.)[a-z]{2}(-[a-z]{2,4})?%s",
+    language_code,
+    source_file_regex
+  )
+  stray_files <- fs::dir_ls(
+    proj_path,
+    recurse = TRUE,
+    regexp = other_lang_regex,
+    perl = TRUE
+  )
+  if (length(stray_files) > 0L) {
+    fs::file_delete(stray_files)
+  }
+
+  invisible(NULL)
 }
 
 #' Filter the freeze directory
@@ -492,10 +531,14 @@ use_lang_chapter <- function(
   book_name,
   directory
 ) {
-  withr::local_dir(file.path(directory, book_name))
-
-  original_chapters_list <- chapters_list
-
+  # File identity (which physical file backs each chapter) is now
+  # established up front by collapse_language_workspace(): every chapter's
+  # base filename (e.g. "chapter1.qmd") already holds this language's
+  # content on disk before we ever get here. So this function's only job
+  # is to translate the "part" title metadata and recurse into nested
+  # chapter groups — it must NOT rewrite file paths or move files anymore,
+  # or it will point Quarto at `.{language_code}.qmd` paths that no longer
+  # exist post-collapse.
   if (is.list(chapters_list)) {
     # part translation
     chapters_list[["part"]] <- chapters_list[[sprintf(
@@ -504,38 +547,18 @@ use_lang_chapter <- function(
     )]] %||% # nolint: line_length_linter
       chapters_list[["part"]]
 
-    # chapters translation
-
-    chapters_list[["chapters"]] <- lang_code_chapter_list(
+    # recurse into nested chapters, still without touching file paths
+    chapters_list[["chapters"]] <- purrr::map(
       chapters_list[["chapters"]],
-      language_code = language_code
+      use_lang_chapter,
+      language_code = language_code,
+      book_name = book_name,
+      directory = directory
     )
-
-    if (!all(fs::file_exists(chapters_list[["chapters"]]))) {
-      chapters_not_translated <- !fs::file_exists(chapters_list[["chapters"]])
-      fs::file_move(
-        unlist(original_chapters_list[["chapters"]][chapters_not_translated]),
-        lang_code_chapter_list(
-          original_chapters_list[["chapters"]][chapters_not_translated],
-          language_code = language_code
-        )
-      )
-    }
 
     if (length(chapters_list[["chapters"]]) == 1L) {
       # https://github.com/ropensci-review-tools/babelquarto/issues/32
       chapters_list[["chapters"]] <- as.list(chapters_list[["chapters"]])
-    }
-  } else {
-    chapters_list <- lang_code_chapter_list(
-      chapters_list,
-      language_code = language_code
-    )
-    if (!fs::file_exists(file.path(directory, book_name, chapters_list))) {
-      fs::file_move(
-        original_chapters_list,
-        chapters_list
-      )
     }
   }
 
