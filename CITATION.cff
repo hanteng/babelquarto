@@ -8,7 +8,7 @@ message: 'To cite package "babelquarto" in publications use:'
 type: software
 license: MIT
 title: 'babelquarto: Renders a Multilingual Quarto Book'
-version: 0.1.0.9000
+version: 0.1.0.9966
 abstract: Automate rendering and cross-linking of Quarto books following a prescribed
   structure.
 authors:
