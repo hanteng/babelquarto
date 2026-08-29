@@ -485,14 +485,26 @@ render_quarto_lang <- function(
 #' @dev
 collapse_language_workspace <- function(proj_path, language_code) {
   source_file_regex <- "\\.(qmd|Rmd|ipynb)$"
-
-  # 1. Promote this pass's localized files to canonical (un-suffixed) paths.
-  lang_suffix_regex <- sprintf("\\.%s%s", language_code, source_file_regex)
+  lang_suffix_regex <- sprintf("\\.%s%s", language_code, source_file_regex)  
   lang_files <- fs::dir_ls(
     proj_path,
     recurse = TRUE,
     regexp = lang_suffix_regex
   )
+  
+  # === RUNTIME DIAGNOSTIC PRINT ===
+  cli::cli_h2("babelquarto Workspace Collapse Diagnostic")
+  cli::cli_alert_info("Target language code: {.val {language_code}}")
+  cli::cli_alert_info("Generated Regex: {.val {lang_suffix_regex}}")
+  cli::cli_alert_info("Matching localized files found: {.val {length(lang_files)}}")
+  
+  if (length(lang_files) == 0L) {
+    # Print sample files in workspace to expose casing/naming mismatches
+    sample_files <- head(fs::dir_ls(proj_path, recurse = TRUE, regexp = source_file_regex), 10)
+    cli::cli_alert_warning("No matching .{language_code}. files found! Sample files on disk:")
+    cli::cli_ul(sample_files)
+  }
+  # ================================
 
   purrr::walk(lang_files, function(lang_file) {
     base_file <- sub(
@@ -503,6 +515,23 @@ collapse_language_workspace <- function(proj_path, language_code) {
     fs::file_copy(lang_file, base_file, overwrite = TRUE)
     fs::file_delete(lang_file)
   })
+
+  other_lang_regex <- sprintf(
+    "\\.(?!%s\\.)[a-z]{2}(-[a-z]{2,4})?%s",
+    language_code,
+    source_file_regex
+  )
+  stray_files <- fs::dir_ls(
+    proj_path,
+    recurse = TRUE,
+    regexp = other_lang_regex,
+    perl = TRUE
+  )
+  if (length(stray_files) > 0L) {
+    fs::file_delete(stray_files)
+  }
+  invisible(NULL)
+}
 
   # 2. Drop any file still carrying a *different* language's suffix; those
   #    are copies of other translations that have no business being
