@@ -112,11 +112,13 @@ render <- function(
     fs::dir_delete(output_folder)
   }
 
-  # render project ----
+  # Render main language pass ----
   temporary_directory <- withr::local_tempdir()
-  profile <- profile %||% Sys.getenv("QUARTO_PROFILE") # ensures default profile = "",  not NULL
+  profile_env <- profile %||% Sys.getenv("QUARTO_PROFILE")
   fs::dir_copy(path, temporary_directory)
+  
   withr::with_dir(file.path(temporary_directory, fs::path_file(path)), {
+    # Remove all language suffixed files for main language pass
     fs::file_delete(fs::dir_ls(
       regexp = "\\...\\.qmd|\\...\\.Rmd|\\...\\.ipynb",
       recurse = TRUE
@@ -126,7 +128,7 @@ render <- function(
     quarto::quarto_render(
       as_job = FALSE,
       metadata = metadata,
-      profile = c(main_language, profile)
+      profile = c(main_language, profile_env)
     )
   })
   fs::dir_copy(
@@ -134,6 +136,7 @@ render <- function(
     path
   )
 
+  # Render secondary languages pass ----
   purrr::walk(
     language_codes,
     render_quarto_lang,
@@ -141,7 +144,7 @@ render <- function(
     output_dir = output_dir,
     type = type,
     site_url = site_url,
-    profile = profile
+    profile = profile_env
   )
 
   ## sitemap fixing ---
@@ -156,13 +159,16 @@ render <- function(
     locs <- purrr::map(
       language_codes,
       \(x) {
-        sitemap_path <- file.path(path, output_dir, x, "sitemap.xml")
-        lines <- brio::read_lines(sitemap_path)
-        fs::file_delete(sitemap_path)
-        lines[3:(length(lines) - 1)]
+        sub_sitemap <- file.path(path, output_dir, x, "sitemap.xml")
+        if (fs::file_exists(sub_sitemap)) {
+          lines <- brio::read_lines(sub_sitemap)
+          fs::file_delete(sub_sitemap)
+          lines[3:(length(lines) - 1)]
+        } else {
+          character(0)
+        }
       }
-    ) |>
-      unlist()
+    ) |> unlist()
     current_sitemap <- brio::read_lines(sitemap_path)
     current_sitemap <- append(current_sitemap, locs, after = 2)
     brio::write_lines(current_sitemap, sitemap_path)
@@ -197,9 +203,10 @@ render <- function(
       output_folder = output_folder,
       path_language = main_language,
       project_dir = path,
-      profile = profile
+      profile = profile_env
     )
   )
+  
   purrr::walk(
     main_language_docs,
     add_cross_links,
@@ -230,7 +237,7 @@ render <- function(
         output_folder = output_folder,
         path_language = other_lang,
         project_dir = path,
-        profile = profile
+        profile = profile_env
       )
     )
     purrr::walk(
@@ -251,6 +258,7 @@ render <- function(
   }
 }
 
+## site_url
 site_url <- function(proj_config, type) {
   if (nzchar(Sys.getenv("BABELQUARTO_CI_URL"))) {
     site_url <- Sys.getenv("BABELQUARTO_CI_URL")
@@ -274,19 +282,6 @@ render_quarto_lang <- function(
   project_name <- fs::path_file(path)
   proj_path <- fs::path(temporary_directory, project_name)
 
-  # Collapse the workspace to a single canonical file per chapter *before*
-  # anything (quarto_inspect, quarto_render) looks at proj_path. Without
-  # this, `name.qmd` (base) and `name.<lang>.qmd` (translated) sit
-  # side-by-side in the temp copy. Quarto's project-wide input globbing is
-  # OS-dependent: Windows' case/path-insensitive matching happens to
-  # shadow the base file, but Linux's strict POSIX globbing treats both as
-  # distinct chapters and renders them separately, inflating a 90-chapter
-  # book into ~170 queued targets and producing duplicate/"fake" English
-  # pages. Collapsing removes the ambiguity for every OS identically.
-  collapse_language_workspace(proj_path, language_code)
-
-  # source for truth in terms of user intent
-  # (not in yaml format and with tags that quarto does not understand)
   proj_config <- quarto::quarto_inspect(
     proj_path,
     profile = c(language_code, profile)
@@ -306,6 +301,16 @@ render_quarto_lang <- function(
       project_name,
       language_code
     )
+  
+  ## [HTL]  
+  # Promote index.<lang>.qmd -> index.qmd so Quarto builds root index.html
+  for (ext in c("qmd", "Rmd", "ipynb")) {
+    idx_lang <- fs::path(proj_path, sprintf("index.%s.%s", language_code, ext))
+    idx_base <- fs::path(proj_path, sprintf("index.%s", ext))
+    if (fs::file_exists(idx_lang)) {
+      fs::file_copy(idx_lang, idx_base, overwrite = TRUE)
+      fs::file_delete(idx_lang)
+    }
   }
 
   config_yaml[["lang"]] <- language_code
@@ -607,26 +612,34 @@ use_lang_chapter <- function(
   directory
 ) {
   withr::local_dir(file.path(directory, book_name))
+
   original_chapters_list <- chapters_list
 
   if (is.list(chapters_list)) {
-    # Translate 'part' title metadata if present
-    chapters_list[["part"]] <- chapters_list[[sprintf("part-%s", language_code)]] %||%
+    # part translation
+    chapters_list[["part"]] <- chapters_list[[sprintf(
+      "part-%s",
+      language_code
+    )]] %||% # nolint: line_length_linter
       chapters_list[["part"]]
 
-    # Recursively translate nested chapter lists
+    # chapters translation
+
     chapters_list[["chapters"]] <- lang_code_chapter_list(
       chapters_list[["chapters"]],
       language_code = language_code
     )
-    
-    chapters_list[["chapters"]] <- purrr::map(
-      chapters_list[["chapters"]],
-      use_lang_chapter,
-      language_code = language_code,
-      book_name = book_name,
-      directory = directory
-    )
+
+    if (!all(fs::file_exists(chapters_list[["chapters"]]))) {
+      chapters_not_translated <- !fs::file_exists(chapters_list[["chapters"]])
+      fs::file_move(
+        unlist(original_chapters_list[["chapters"]][chapters_not_translated]),
+        lang_code_chapter_list(
+          original_chapters_list[["chapters"]][chapters_not_translated],
+          language_code = language_code
+        )
+      )
+    }
 
     if (length(chapters_list[["chapters"]]) == 1L) {
       # https://github.com/ropensci-review-tools/babelquarto/issues/32
@@ -638,6 +651,12 @@ use_lang_chapter <- function(
       chapters_list,
       language_code = language_code
     )
+    if (!fs::file_exists(file.path(directory, book_name, chapters_list))) {
+      fs::file_move(
+        original_chapters_list,
+        chapters_list
+      )
+    }
   }
 
   chapters_list
