@@ -367,6 +367,49 @@ render_quarto_lang <- function(
   config_yaml <- replace_true_false(config_yaml)
   yaml::write_yaml(config_yaml, file = config_path)
 
+  ## [HTL] Restore Website/Multilingual Branching in render_quarto_lang()
+  ## Re-enable the proper file replacement loop for non-book or website formats:
+
+  if (type == "website") {
+    qmds <- fs::dir_ls(
+      file.path(temporary_directory, fs::path_file(path)),
+      glob = "*.qmd|*.Rmd|*.ipynb",
+      recurse = TRUE
+    )
+    language_files <- purrr::keep(
+      qmds,
+      \(x) {
+        any(
+          endsWith(x, sprintf(".%s.qmd", language_code)),
+          endsWith(x, sprintf(".%s.Rmd", language_code)),
+          endsWith(x, sprintf(".%s.ipynb", language_code))
+        )
+      }
+    )
+    # Delete non-target language files so Quarto doesn't double-render
+    fs::file_delete(qmds[!(qmds %in% language_files)])
+    
+    # Move/Rename language files to canonical names for rendering pass
+    for (file_path in language_files) {
+      if (endsWith(file_path, sprintf(".%s.qmd", language_code))) {
+        fs::file_move(
+          file_path,
+          sub(sprintf("\\.%s\\.qmd$", language_code), ".qmd", file_path)
+        )
+      } else if (endsWith(file_path, sprintf(".%s.Rmd", language_code))) {
+        fs::file_move(
+          file_path,
+          sub(sprintf("\\.%s\\.Rmd$", language_code), ".Rmd", file_path)
+        )
+      } else if (endsWith(file_path, sprintf(".%s.ipynb", language_code))) {
+        fs::file_move(
+          file_path,
+          sub(sprintf("\\.%s\\.ipynb$", language_code), ".ipynb", file_path)
+        )
+      }
+    }
+  }
+
   # Render language book
   metadata <- list("yes")
   names(metadata) <- sprintf("lang-%s", language_code)
@@ -525,29 +568,29 @@ filter_freeze_directory <- function(
   fs::dir_delete(freeze_temp)
 }
 
+  ## [HTL] Restore use_lang_chapter() (R/render.R)
+  ## Restore path resolution and lang_code_chapter_list() so _quarto.yml gets the localized chapter names: 
+
 use_lang_chapter <- function(
   chapters_list,
   language_code,
   book_name,
   directory
 ) {
-  # File identity (which physical file backs each chapter) is now
-  # established up front by collapse_language_workspace(): every chapter's
-  # base filename (e.g. "chapter1.qmd") already holds this language's
-  # content on disk before we ever get here. So this function's only job
-  # is to translate the "part" title metadata and recurse into nested
-  # chapter groups — it must NOT rewrite file paths or move files anymore,
-  # or it will point Quarto at `.{language_code}.qmd` paths that no longer
-  # exist post-collapse.
+  withr::local_dir(file.path(directory, book_name))
+  original_chapters_list <- chapters_list
+
   if (is.list(chapters_list)) {
-    # part translation
-    chapters_list[["part"]] <- chapters_list[[sprintf(
-      "part-%s",
-      language_code
-    )]] %||% # nolint: line_length_linter
+    # Translate 'part' title metadata if present
+    chapters_list[["part"]] <- chapters_list[[sprintf("part-%s", language_code)]] %||%
       chapters_list[["part"]]
 
-    # recurse into nested chapters, still without touching file paths
+    # Recursively translate nested chapter lists
+    chapters_list[["chapters"]] <- lang_code_chapter_list(
+      chapters_list[["chapters"]],
+      language_code = language_code
+    )
+    
     chapters_list[["chapters"]] <- purrr::map(
       chapters_list[["chapters"]],
       use_lang_chapter,
@@ -560,6 +603,12 @@ use_lang_chapter <- function(
       # https://github.com/ropensci-review-tools/babelquarto/issues/32
       chapters_list[["chapters"]] <- as.list(chapters_list[["chapters"]])
     }
+  } else {
+    # Convert base filename (e.g., intro.qmd) to language-suffixed filename (e.g., intro.en.qmd)
+    chapters_list <- lang_code_chapter_list(
+      chapters_list,
+      language_code = language_code
+    )
   }
 
   chapters_list
