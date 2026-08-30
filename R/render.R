@@ -349,6 +349,28 @@ render_quarto_lang <- function(
       book_name = project_name,
       directory = temporary_directory
     )
+    # ==================== INSERT PATCH 1 HERE ====================
+    # 1. Forward top-level language dictionary if present in original config
+    if (!is.null(proj_config[["language"]])) {
+      config_yaml[["language"]] <- proj_config[["language"]][[language_code]] %||% proj_config[["language"]]
+    }
+
+    # 2. Extract localized appendix title from proj_config
+    localized_apx_title <- proj_config[[sprintf("appendices-title-%s", language_code)]] %||%
+                           proj_config[["book"]][[sprintf("appendices-title-%s", language_code)]] %||%
+                           proj_config[["language"]][[language_code]][["section-title-appendices"]] %||%
+                           proj_config[["language"]][["section-title-appendices"]] %||%
+                           proj_config[["language"]][[language_code]][["section-title-appendix"]] %||%
+                           proj_config[["language"]][["section-title-appendix"]]
+
+    if (!is.null(localized_apx_title)) {
+      if (is.null(config_yaml[["language"]])) {
+        config_yaml[["language"]] <- list()
+      }
+      config_yaml[["language"]][["section-title-appendices"]] <- localized_apx_title
+      config_yaml[["language"]][["section-title-appendix"]] <- localized_apx_title
+    }
+    # =============================================================
   }
 
   # Replace TRUE and FALSE with 'true' and 'false'
