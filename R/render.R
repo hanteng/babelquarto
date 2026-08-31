@@ -371,7 +371,7 @@ render_quarto_lang <- function(
       config_yaml[["language"]][["section-title-appendix"]] <- localized_apx_title
     }
     # =============================================================
-  }  }
+  }
 
   # Replace TRUE and FALSE with 'true' and 'false'
   # to avoid converting to "yes" and "no"
