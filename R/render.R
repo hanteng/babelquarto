@@ -373,6 +373,28 @@ render_quarto_lang <- function(
     # =============================================================
   }
 
+    # ==================== PATCH 4: forward format-<lang> ====================
+  lang_format <- proj_config[[sprintf("format-%s", language_code)]]
+
+  if (!is.null(lang_format)) {
+    safe_modify_list <- function(x, val) {
+      for (name in names(val)) {
+        if (is.list(x[[name]]) && is.list(val[[name]]) &&
+            !is.data.frame(x[[name]]) && !is.data.frame(val[[name]])) {
+          x[[name]] <- safe_modify_list(x[[name]], val[[name]])
+        } else {
+          x[[name]] <- val[[name]]
+        }
+      }
+      x
+    }
+    config_yaml[["format"]] <- safe_modify_list(
+      config_yaml[["format"]],
+      lang_format
+    )
+  }
+  # ==========================================================================
+
   # Replace TRUE and FALSE with 'true' and 'false'
   # to avoid converting to "yes" and "no"
   config_yaml <- replace_true_false(config_yaml)
