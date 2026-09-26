@@ -427,10 +427,6 @@ render_quarto_lang <- function(
   }
   # ==========================================================================
 
-  # Replace TRUE and FALSE with 'true' and 'false'
-  # to avoid converting to "yes" and "no"
-  config_yaml <- replace_true_false(config_yaml)
-  yaml::write_yaml(config_yaml, file = config_path)
   write_yaml(config_yaml, config_path)
 
   if (type == "website") {
